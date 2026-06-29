@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/nextlevelbuilder/goclaw/internal/agent"
+	"github.com/nextlevelbuilder/goclaw/internal/bootstrap"
 	"github.com/nextlevelbuilder/goclaw/internal/permissions"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
@@ -27,6 +28,16 @@ func NewOrchestrationHandler(agents store.AgentStore, teams store.TeamStore, lin
 func (h *OrchestrationHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/agents/{agentID}/orchestration", h.auth(h.handleGetMode))
 	mux.HandleFunc("POST /v1/agents/{agentID}/links", h.adminAuth(h.handleCreateLink))
+	mux.HandleFunc("PUT /v1/agents/{agentID}/context-files/{name}", h.adminAuth(h.handleSetContextFile))
+}
+
+// seedableContextFiles is the set of identity context files an admin seed may
+// overwrite directly. Operational templates (AGENTS.md, TOOLS.md) stay fixed and
+// are intentionally excluded.
+var seedableContextFiles = map[string]bool{
+	bootstrap.SoulFile:         true,
+	bootstrap.IdentityFile:     true,
+	bootstrap.CapabilitiesFile: true,
 }
 
 func (h *OrchestrationHandler) auth(next http.HandlerFunc) http.HandlerFunc {
@@ -172,6 +183,53 @@ func (h *OrchestrationHandler) handleCreateLink(w http.ResponseWriter, r *http.R
 	}
 
 	writeJSON(w, http.StatusCreated, map[string]any{"link": link, "created": true})
+}
+
+type setContextFileBody struct {
+	Content string `json:"content"`
+}
+
+// handleSetContextFile overwrites a single identity context file (SOUL.md,
+// IDENTITY.md, CAPABILITIES.md) for an agent. Lets the ai-claw orchestrator seed
+// give predefined agents distinct, reviewable identities deterministically,
+// without depending on the LLM summon step or a configured provider.
+func (h *OrchestrationHandler) handleSetContextFile(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	agentID, err := uuid.Parse(r.PathValue("agentID"))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid agent ID"})
+		return
+	}
+
+	name := r.PathValue("name")
+	if !seedableContextFiles[name] {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "context file not writable"})
+		return
+	}
+
+	var body setContextFileBody
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
+		return
+	}
+	if body.Content == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "content is required"})
+		return
+	}
+
+	if _, err := h.agents.GetByID(ctx, agentID); err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "agent not found"})
+		return
+	}
+
+	if err := h.agents.SetAgentContextFile(ctx, agentID, name, body.Content); err != nil {
+		slog.Warn("orchestration.set_context_file failed", "agent", agentID, "file", name, "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to set context file"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"agent_id": agentID, "file": name, "updated": true})
 }
 
 func (h *OrchestrationHandler) resolveAgent(ctx context.Context, keyOrID string) (*store.AgentData, error) {

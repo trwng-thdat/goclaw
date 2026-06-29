@@ -40,7 +40,11 @@ var modeTaskToolDenylist = map[string]bool{
 // modeAiClawToolAllowlist is the focused tool set for ai-claw product mode.
 // ai-claw agents are company chat assistants backed by MCP integrations; they
 // need file/memory/web/skill/media-read tools but not the full ~30-tool surface
-// (no media generation, browser, cron, heartbeat, sub-orchestration, sessions).
+// (no media generation, browser, cron, heartbeat, sessions).
+// Orchestration tools (delegate, team_tasks) are allowlisted but stay gated
+// upstream by ResolveOrchestrationMode: only lead agents with active links or a
+// team ever receive them, so plain aiclaw assistants are unaffected while
+// orchestrators can actually route work to their specialists.
 // Allowlist (not denylist) keeps token cost low and predictable.
 var modeAiClawToolAllowlist = map[string]bool{
 	"read_file":       true,
@@ -58,6 +62,8 @@ var modeAiClawToolAllowlist = map[string]bool{
 	"read_document":   true,
 	"skill_search":    true,
 	"use_skill":       true,
+	"delegate":        true,
+	"team_tasks":      true,
 }
 
 // filterBootstrapTools returns only the bootstrap-allowed tools from the full tool list.
