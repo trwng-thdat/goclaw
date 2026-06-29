@@ -54,6 +54,22 @@ func (e *MediaProviderEntry) applyDefaults() {
 	}
 }
 
+// resolveModel returns the model to use for a provider entry.
+// Priority: defaultModels map > provider.DefaultModel() > parent agent's model from context.
+func resolveModel(ctx context.Context, providerName string, defaultModels map[string]string, registry *providers.Registry) string {
+	if m := defaultModels[providerName]; m != "" {
+		return m
+	}
+	if registry != nil {
+		if p, err := registry.Get(ctx, providerName); err == nil {
+			if m := p.DefaultModel(); m != "" {
+				return m
+			}
+		}
+	}
+	return ParentModelFromCtx(ctx)
+}
+
 // ResolveMediaProviderChain parses builtin_tools.settings for a media tool and
 // returns an ordered list of enabled provider entries. Falls back to hardcoded
 // defaults when no user-configured chain exists.
@@ -74,7 +90,7 @@ func ResolveMediaProviderChain(
 	if perAgentProvider != "" {
 		model := perAgentModel
 		if model == "" {
-			model = defaultModels[perAgentProvider]
+			model = resolveModel(ctx, perAgentProvider, defaultModels, registry)
 		}
 		entry := MediaProviderEntry{
 			Provider: perAgentProvider,
@@ -88,7 +104,7 @@ func ResolveMediaProviderChain(
 	// 2. Parse from builtin_tools.settings
 	if settings := BuiltinToolSettingsFromCtx(ctx); settings != nil {
 		if raw, ok := settings[toolName]; ok && len(raw) > 0 {
-			chain := parseChainSettings(raw, defaultModels)
+			chain := parseChainSettings(ctx, raw, defaultModels, registry)
 			if len(chain) > 0 {
 				return chain
 			}
@@ -101,7 +117,7 @@ func ResolveMediaProviderChain(
 
 // parseChainSettings parses the settings JSON into a chain, handling both new
 // and legacy formats. Returns nil if parsing fails or result is empty.
-func parseChainSettings(raw []byte, defaultModels map[string]string) []MediaProviderEntry {
+func parseChainSettings(ctx context.Context, raw []byte, defaultModels map[string]string, registry *providers.Registry) []MediaProviderEntry {
 	var chain mediaProviderChain
 	if err := json.Unmarshal(raw, &chain); err != nil {
 		slog.Warn("media_chain: failed to parse settings", "error", err)
@@ -117,7 +133,7 @@ func parseChainSettings(raw []byte, defaultModels map[string]string) []MediaProv
 			continue
 		}
 		if e.Model == "" {
-			e.Model = defaultModels[e.Provider]
+			e.Model = resolveModel(ctx, e.Provider, defaultModels, registry)
 		}
 		e.applyDefaults()
 		result = append(result, e)
@@ -125,8 +141,9 @@ func parseChainSettings(raw []byte, defaultModels map[string]string) []MediaProv
 	return result
 }
 
-// buildDefaultChain creates a chain from the hardcoded priority list,
-// including only providers that are currently registered.
+// buildDefaultChain builds the provider chain when no explicit settings exist.
+// It tries the agent's own chat provider first (highest priority), then
+// falls back to the hardcoded priority list of dedicated media providers.
 func buildDefaultChain(
 	ctx context.Context,
 	priority []string,
@@ -134,6 +151,32 @@ func buildDefaultChain(
 	registry *providers.Registry,
 ) []MediaProviderEntry {
 	var chain []MediaProviderEntry
+
+	// 1. Agent's own chat provider — use the same provider+model the agent
+	//    is already chatting with. This is the common case for ai-claw
+	//    deployments where agents have a single provider configured.
+	if parentProvider := ParentProviderFromCtx(ctx); parentProvider != "" {
+		if p, err := registry.Get(ctx, parentProvider); err == nil {
+			model := defaultModels[parentProvider]
+			if model == "" {
+				model = p.DefaultModel()
+			}
+			if model == "" {
+				model = ParentModelFromCtx(ctx)
+			}
+			entry := MediaProviderEntry{
+				Provider: parentProvider,
+				Model:    model,
+				Enabled:  true,
+			}
+			entry.applyDefaults()
+			chain = append(chain, entry)
+			slog.Info("media_chain: using agent provider", "provider", parentProvider, "model", model)
+			return chain
+		}
+	}
+
+	// 2. Hardcoded priority list — dedicated media providers (gemini, anthropic, etc.)
 	for _, name := range priority {
 		if _, err := registry.Get(ctx, name); err == nil {
 			entry := MediaProviderEntry{
@@ -145,6 +188,7 @@ func buildDefaultChain(
 			chain = append(chain, entry)
 		}
 	}
+
 	return chain
 }
 

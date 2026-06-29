@@ -59,6 +59,7 @@ var documentProviderPriority = []string{"gemini", "anthropic", "claude-cli", "op
 // Empty string lets the provider pick its own default model.
 var documentModelDefaults = map[string]string{
 	"gemini":     "gemini-2.5-flash",
+	"anthropic":  "",
 	"openrouter": "google/gemini-2.5-flash",
 	"claude-cli": "",
 	"dashscope":  "qwen-vl-max",
